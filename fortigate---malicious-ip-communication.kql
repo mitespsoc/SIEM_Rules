@@ -1,0 +1,53 @@
+// Name: FortiGate - Malicious IP Communication
+// Author: detections.ai
+// Date: 2025-09-09
+//
+// Description: This detection identifies traffic from or to a known malicious IP address, based on Microsoft Sentinel's threat intelligence feeds.
+// The rule joins FortiGate traffic logs with the ThreatIntelligenceIndicator table.
+//
+// False Positive Sensitivity: Medium
+// - This rule may generate false positives if threat intelligence feeds contain outdated or incorrect information.
+// - Internal RFC1918 IP ranges are excluded to reduce noise. You may need to adjust this if you use internal threat feeds.
+// - To further reduce false positives, consider filtering on the ConfidenceScore from your TI feed (e.g., | where ConfidenceScore > 75).
+let lookback = 1h;
+// Retrieve active IP-based threat indicators from threat intelligence feeds.
+let malicious_ips = ThreatIntelligenceIndicator
+| where TimeGenerated > ago(lookback)
+| where Active == true and ExpirationDateTime > now()
+| where isnotempty(NetworkIP)
+| summarize by NetworkIP, Description, ConfidenceScore, ThreatType;
+// Search FortiGate traffic logs for communication with malicious IPs.
+CommonSecurityLog
+| where TimeGenerated > ago(lookback)
+| where DeviceVendor == "Fortinet"
+// Focus on traffic logs which will have source and destination IPs.
+| where isnotempty(SourceIP) and isnotempty(DestinationIP)
+// Exclude private IP ranges to reduce potential noise.
+| where not(ipv4_is_private(SourceIP)) and not(ipv4_is_private(DestinationIP))
+// Join FortiGate logs with the malicious IP list.
+| join kind=inner (
+    malicious_ips
+) on $left.SourceIP == $right.NetworkIP or $left.DestinationIP == $right.NetworkIP
+// Determine if the communication was inbound or outbound.
+| extend CommunicationDirection = iif(SourceIP == NetworkIP, "Outbound", "Inbound")
+| project
+    TimeGenerated,
+    DeviceProduct,
+    DeviceAction,
+    SourceIP,
+    SourcePort,
+    DestinationIP,
+    DestinationPort,
+    ThreatIP = NetworkIP,
+    ThreatDescription = Description,
+    ThreatType,
+    ConfidenceScore,
+    CommunicationDirection,
+    ReceiptTime,
+    StartTime,
+    AdditionalExtensions
+| extend
+    timestamp = TimeGenerated,
+    HostName = tostring(split(Computer, ".")[0]),
+    DvcHostname = HostName,
+    IpAddress = SourceIP
